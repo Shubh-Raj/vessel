@@ -1,0 +1,12 @@
+{
+  "name": "browse-container",
+  "version": "1.0.0",
+  "description": "Headless Chromium container for remote browser control",
+  "main": "browser.js",
+  "scripts": {
+    "start": "node browser.js"
+  },
+  "dependencies": {
+    "puppeteer-core": "^21.0.0"
+  }
+}
