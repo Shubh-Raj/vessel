@@ -1,50 +1,170 @@
 const puppeteer = require('puppeteer-core');
-const fs = require('fs');
-const path = require('path');
+const { WebSocketServer } = require('ws');
 
 const CHROMIUM_PATH = '/usr/bin/chromium';
+const WS_PORT = 3001;
+const VIEWPORT = { width: 1280, height: 720 };
+const START_URL = 'https://google.com';
 
-const TARGET_URL = 'https://example.com';
+const BROWSER_ARGS = [
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-gpu',
+  '--disable-dev-shm-usage',
+];
 
-const SCREENSHOT_PATH = '/tmp/screenshot.png';
+const wss = new WebSocketServer({ port: WS_PORT, host: '0.0.0.0' });
 
-async function main() {
-  console.log('[browser.js] Starting Chromium via Puppeteer...');
+console.log(`[container] WebSocket server listening on ws://0.0.0.0:${WS_PORT}`);
+
+wss.on('connection', async (ws) => {
+  console.log('[container] Client connected — launching browser session...');
+
+  let browser = null;
+  let cdpClient = null;
+
+  try {
+    browser = await puppeteer.launch({
+      executablePath: CHROMIUM_PATH,
+      headless: true,
+      args: BROWSER_ARGS,
+    });
+
+    const page = await browser.newPage();
+    await page.setViewport(VIEWPORT);
+
+    console.log(`[container] Navigating to ${START_URL}...`);
+    await page.goto(START_URL, { waitUntil: 'domcontentloaded' });
+    console.log('[container] Page ready. Starting screencast...');
+
+    cdpClient = await page.createCDPSession();
+
+    await cdpClient.send('Page.startScreencast', {
+      format: 'jpeg',
+      quality: 75,
+      maxWidth: VIEWPORT.width,
+      maxHeight: VIEWPORT.height,
+      everyNthFrame: 1,
+    });
+
+    cdpClient.on('Page.screencastFrame', async ({ data, sessionId }) => {
+      if (ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify({ type: 'frame', data }));
+      }
+      try {
+        await cdpClient.send('Page.screencastFrameAck', { sessionId });
+      } catch (_) {
+        // session may have closed so ignore
+      }
+    });
 
 
-  const browser = await puppeteer.launch({
-    executablePath: CHROMIUM_PATH,
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-gpu',
-      '--disable-dev-shm-usage',
-    ],
+    //    I used normalized coordinates (0.0 to 1.0) so the frontend doesn't need to know the container's viewport resolution. I multiplied here.
+    ws.on('message', async (raw) => {
+      let msg;
+      try {
+        msg = JSON.parse(raw.toString());
+      } catch {
+        console.warn('[container] Received non-JSON message, ignoring.');
+        return;
+      }
+
+      try {
+        switch (msg.type) {
+
+          case 'click': {
+            //  normalized coords to pixel coords
+            const px = Math.round(msg.x * VIEWPORT.width);
+            const py = Math.round(msg.y * VIEWPORT.height);
+            console.log(`[container] Click at pixel (${px}, ${py})`);
+
+
+            await cdpClient.send('Input.dispatchMouseEvent', {
+              type: 'mousePressed', x: px, y: py,
+              button: 'left', clickCount: 1,
+              modifiers: 0,
+            });
+            await cdpClient.send('Input.dispatchMouseEvent', {
+              type: 'mouseReleased', x: px, y: py,
+              button: 'left', clickCount: 1,
+              modifiers: 0,
+            });
+            break;
+          }
+
+          case 'mousemove': {
+            const px = Math.round(msg.x * VIEWPORT.width);
+            const py = Math.round(msg.y * VIEWPORT.height);
+            await cdpClient.send('Input.dispatchMouseEvent', {
+              type: 'mouseMoved', x: px, y: py,
+              button: 'none',
+            });
+            break;
+          }
+
+          case 'scroll': {
+            const px = Math.round(msg.x * VIEWPORT.width);
+            const py = Math.round(msg.y * VIEWPORT.height);
+            await cdpClient.send('Input.dispatchMouseEvent', {
+              type: 'mouseWheel', x: px, y: py,
+              deltaX: 0, deltaY: msg.deltaY || 100,
+            });
+            break;
+          }
+
+          case 'keydown': {
+  
+            await cdpClient.send('Input.dispatchKeyEvent', {
+              type: 'keyDown', key: msg.key,
+            });
+            await cdpClient.send('Input.dispatchKeyEvent', {
+              type: 'keyUp', key: msg.key,
+            });
+            break;
+          }
+
+          case 'type': {
+            await cdpClient.send('Input.insertText', { text: msg.text });
+            break;
+          }
+
+          case 'navigate': {
+            console.log(`[container] Navigating to: ${msg.url}`);
+            await page.goto(msg.url, { waitUntil: 'domcontentloaded' });
+            break;
+          }
+
+          default:
+            console.warn(`[container] Unknown command type: ${msg.type}`);
+        }
+      } catch (err) {
+        console.error('[container] Error handling command:', err.message);
+      }
+    });
+
+  } catch (err) {
+    console.error('[container] Failed to start browser session:', err.message);
+    ws.close();
+    return;
+  }
+
+  ws.on('close', async () => {
+    console.log('[container] Client disconnected. Cleaning up...');
+    try {
+      if (cdpClient) await cdpClient.send('Page.stopScreencast');
+    } catch (_) {}
+    try {
+      if (browser) await browser.close();
+    } catch (_) {}
+    console.log('[container] Browser closed. Ready for next connection.');
   });
 
-  console.log('[browser.js] Browser launched. Opening new page...');
-  const page = await browser.newPage();
+  ws.on('error', (err) => {
+    console.error('[container] WebSocket error:', err.message);
+  });
+});
 
-  await page.setViewport({ width: 1280, height: 720 });
-
-  console.log(`[browser.js] Navigating to: ${TARGET_URL}`);
-  await page.goto(TARGET_URL, { waitUntil: 'networkidle2' });
-
-  const title = await page.title();
-  console.log(`[browser.js] Page loaded! Title: "${title}"`);
-
-  console.log(`[browser.js] Taking screenshot → ${SCREENSHOT_PATH}`);
-  await page.screenshot({ path: SCREENSHOT_PATH, fullPage: false });
-
-  console.log('[browser.js] Screenshot saved.');
-  console.log('[browser.js] Phase 1 complete — container is working!');
-
-  await browser.close();
-  console.log('[browser.js] Browser closed. Exiting.');
-}
-
-main().catch((err) => {
-  console.error('[browser.js] FATAL ERROR:', err);
+wss.on('error', (err) => {
+  console.error('[container] Server error:', err.message);
   process.exit(1);
 });

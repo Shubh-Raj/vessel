@@ -36,4 +36,6 @@ RUN npm install --omit=dev
 
 COPY browser.js ./
 
+EXPOSE 3001
+
 CMD ["node", "browser.js"]

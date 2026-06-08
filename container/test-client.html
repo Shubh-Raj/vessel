@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Phase 2 — Container Stream Test</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0f0f13;
+      color: #e2e8f0;
+      font-family: 'Segoe UI', monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px;
+      gap: 16px;
+      min-height: 100vh;
+    }
+    h1 { font-size: 1.2rem; color: #7c6ef0; letter-spacing: 0.05em; }
+    #status {
+      font-size: 0.85rem;
+      padding: 6px 14px;
+      border-radius: 20px;
+      background: #1e1e2e;
+      border: 1px solid #2d2d3f;
+    }
+    #status.connected  { border-color: #4ade80; color: #4ade80; }
+    #status.connecting { border-color: #facc15; color: #facc15; }
+    #status.error      { border-color: #f87171; color: #f87171; }
+    #stream {
+      width: 1280px;
+      max-width: 100%;
+      aspect-ratio: 16/9;
+      background: #1a1a2e;
+      border: 1px solid #2d2d3f;
+      border-radius: 8px;
+      cursor: crosshair;
+      display: block;
+    }
+    #controls {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    button {
+      padding: 8px 18px;
+      border-radius: 6px;
+      border: 1px solid #3d3d5c;
+      background: #1e1e30;
+      color: #e2e8f0;
+      cursor: pointer;
+      font-size: 0.85rem;
+      transition: background 0.15s;
+    }
+    button:hover { background: #2d2d44; }
+    input[type="text"] {
+      padding: 8px 12px;
+      border-radius: 6px;
+      border: 1px solid #3d3d5c;
+      background: #1e1e30;
+      color: #e2e8f0;
+      width: 300px;
+      font-size: 0.85rem;
+    }
+    #log {
+      width: 100%;
+      max-width: 1280px;
+      height: 120px;
+      overflow-y: auto;
+      background: #0a0a12;
+      border: 1px solid #1e1e2e;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 0.75rem;
+      color: #64748b;
+      font-family: monospace;
+    }
+    #fps {
+      font-size: 0.75rem;
+      color: #64748b;
+    }
+  </style>
+</head>
+<body>
+
+<h1>🧪 Phase 2 — Container Stream Test</h1>
+<div id="status" class="connecting">● Connecting...</div>
+<img id="stream" alt="Browser stream" />
+<div id="controls">
+  <input id="urlInput" type="text" value="https://google.com" placeholder="URL to navigate to" />
+  <button onclick="sendNavigate()">Go</button>
+  <button onclick="sendScroll(1)">Scroll Down</button>
+  <button onclick="sendScroll(-1)">Scroll Up</button>
+  <span id="fps">0 fps</span>
+</div>
+<div id="log"></div>
+
+<script>
+  const WS_URL = 'ws://localhost:3001';
+
+  const statusEl = document.getElementById('status');
+  const streamEl = document.getElementById('stream');
+  const logEl    = document.getElementById('log');
+  const fpsEl    = document.getElementById('fps');
+
+  let ws = null;
+  let frameCount = 0;
+
+  setInterval(() => {
+    fpsEl.textContent = `${frameCount} fps`;
+    frameCount = 0;
+  }, 1000);
+
+  function log(msg) {
+    const line = document.createElement('div');
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+    // Keep log from growing forever
+    while (logEl.children.length > 50) logEl.removeChild(logEl.firstChild);
+  }
+
+  function connect() {
+    statusEl.textContent = '● Connecting...';
+    statusEl.className = 'connecting';
+    log(`Connecting to ${WS_URL}...`);
+
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+      statusEl.textContent = '● Connected';
+      statusEl.className = 'connected';
+      log('WebSocket connected! Waiting for frames...');
+    };
+
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'frame') {
+        streamEl.src = 'data:image/jpeg;base64,' + msg.data;
+        frameCount++;
+      }
+    };
+
+    ws.onclose = () => {
+      statusEl.textContent = '● Disconnected';
+      statusEl.className = 'error';
+      log('WebSocket closed. Reconnecting in 2s...');
+      setTimeout(connect, 2000);
+    };
+
+    ws.onerror = (err) => {
+      statusEl.textContent = '● Error';
+      statusEl.className = 'error';
+      log('WebSocket error — is the container running?');
+    };
+  }
+
+  streamEl.addEventListener('click', (e) => {
+    const rect = streamEl.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    send({ type: 'click', x, y });
+    log(`Click at (${x.toFixed(3)}, ${y.toFixed(3)})`);
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT') return;
+    e.preventDefault();
+
+    if (e.key.length === 1) {
+      
+      send({ type: 'type', text: e.key });
+    } else {
+      send({ type: 'keydown', key: e.key });
+    }
+    log(`Key: ${e.key}`);
+  });
+
+  streamEl.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const rect = streamEl.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    send({ type: 'scroll', x, y, deltaY: e.deltaY });
+  }, { passive: false });
+
+  function sendNavigate() {
+    const url = document.getElementById('urlInput').value;
+    send({ type: 'navigate', url });
+    log(`Navigate → ${url}`);
+  }
+
+  function sendScroll(dir) {
+    send({ type: 'scroll', x: 0.5, y: 0.5, deltaY: dir * 300 });
+  }
+
+  function send(msg) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(msg));
+    }
+  }
+
+  connect();
+</script>
+</body>
+</html>
