@@ -1,0 +1,15 @@
+{
+  "name": "browse-backend",
+  "version": "3.0.0",
+  "description": "Orchestrator backend: spins up Docker containers and relays WebSocket streams",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "dockerode": "^4.0.2",
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
+  }
+}

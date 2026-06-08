@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Phase 3 — Backend Relay Test</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0d0d14;
+      color: #e2e8f0;
+      font-family: 'Segoe UI', monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px;
+      gap: 14px;
+      min-height: 100vh;
+    }
+    h1 { font-size: 1.1rem; color: #818cf8; letter-spacing: 0.06em; }
+    #status {
+      font-size: 0.8rem;
+      padding: 5px 14px;
+      border-radius: 20px;
+      background: #1e1e2e;
+      border: 1px solid #2d2d3f;
+      transition: all 0.3s;
+    }
+    #status.connecting    { border-color: #facc15; color: #facc15; }
+    #status.booting       { border-color: #fb923c; color: #fb923c; }
+    #status.ready         { border-color: #4ade80; color: #4ade80; }
+    #status.error         { border-color: #f87171; color: #f87171; }
+    #stream {
+      width: 1280px;
+      max-width: 100%;
+      aspect-ratio: 16/9;
+      background: #111122;
+      border: 1px solid #2a2a40;
+      border-radius: 8px;
+      cursor: crosshair;
+      display: block;
+    }
+    #controls {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    button {
+      padding: 7px 16px;
+      border-radius: 6px;
+      border: 1px solid #3d3d5c;
+      background: #1e1e30;
+      color: #e2e8f0;
+      cursor: pointer;
+      font-size: 0.82rem;
+      transition: background 0.15s;
+    }
+    button:hover { background: #2a2a42; }
+    input[type="text"] {
+      padding: 7px 12px;
+      border-radius: 6px;
+      border: 1px solid #3d3d5c;
+      background: #1e1e30;
+      color: #e2e8f0;
+      width: 280px;
+      font-size: 0.82rem;
+    }
+    #meta { font-size: 0.72rem; color: #475569; display: flex; gap: 16px; }
+    #log {
+      width: 100%;
+      max-width: 1280px;
+      height: 110px;
+      overflow-y: auto;
+      background: #07070f;
+      border: 1px solid #1a1a2e;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 0.72rem;
+      color: #64748b;
+      font-family: monospace;
+    }
+    .log-info  { color: #64748b; }
+    .log-ok    { color: #4ade80; }
+    .log-warn  { color: #facc15; }
+    .log-error { color: #f87171; }
+  </style>
+</head>
+<body>
+
+<h1>🔁 Phase 3 — Backend Relay Test</h1>
+<div id="status" class="connecting">● Connecting to backend...</div>
+
+<img id="stream" alt="Remote browser stream" />
+
+<div id="controls">
+  <input id="urlInput" type="text" value="https://google.com" placeholder="URL" />
+  <button onclick="sendNavigate()">Go</button>
+  <button onclick="sendScroll(1)">Scroll ↓</button>
+  <button onclick="sendScroll(-1)">Scroll ↑</button>
+</div>
+
+<div id="meta">
+  <span id="fps">0 fps</span>
+  <span id="container-id">Container: —</span>
+</div>
+
+<div id="log"></div>
+
+<script>
+  const WS_URL = 'ws://localhost:3000';
+
+  const statusEl      = document.getElementById('status');
+  const streamEl      = document.getElementById('stream');
+  const logEl         = document.getElementById('log');
+  const fpsEl         = document.getElementById('fps');
+  const containerIdEl = document.getElementById('container-id');
+
+  let ws = null;
+  let frameCount = 0;
+  let sessionReady = false;
+
+  setInterval(() => {
+    fpsEl.textContent = `${frameCount} fps`;
+    frameCount = 0;
+  }, 1000);
+
+  setInterval(async () => {
+    try {
+      const res = await fetch('http://localhost:3000/api/status');
+      const data = await res.json();
+      containerIdEl.textContent = `Container: ${data.containerId ?? '—'}`;
+    } catch (_) {}
+  }, 3000);
+
+  function setStatus(text, cls) {
+    statusEl.textContent = `● ${text}`;
+    statusEl.className = cls;
+  }
+
+  function log(msg, type = 'info') {
+    const line = document.createElement('div');
+    line.className = `log-${type}`;
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+    while (logEl.children.length > 60) logEl.removeChild(logEl.firstChild);
+  }
+
+  function connect() {
+    setStatus('Connecting to backend...', 'connecting');
+    log(`Opening WebSocket to ${WS_URL}...`);
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+      setStatus('Backend connected — waiting for container...', 'booting');
+      log('Backend WS connected. Container is starting...', 'ok');
+    };
+
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+
+      switch (msg.type) {
+        case 'frame':
+          streamEl.src = 'data:image/jpeg;base64,' + msg.data;
+          frameCount++;
+          break;
+
+        case 'status':
+          log(`Backend status: ${msg.message}`, 'warn');
+          if (msg.message === 'container_starting') {
+            setStatus('Container booting (launching Chromium)...', 'booting');
+          } else if (msg.message === 'session_ready') {
+            setStatus('Session active — stream live', 'ready');
+            log('Session ready! You can interact with the browser.', 'ok');
+            sessionReady = true;
+          } else if (msg.message === 'container_closed') {
+            setStatus('Container closed', 'error');
+            sessionReady = false;
+          }
+          break;
+
+        case 'error':
+          setStatus(`Error: ${msg.message}`, 'error');
+          log(`Error: ${msg.message}`, 'error');
+          break;
+      }
+    };
+
+    ws.onclose = () => {
+      setStatus('Disconnected — reconnecting in 3s...', 'error');
+      log('WebSocket closed. Reconnecting...', 'warn');
+      sessionReady = false;
+      setTimeout(connect, 3000);
+    };
+
+    ws.onerror = () => {
+      setStatus('Connection error — is the backend running?', 'error');
+      log('Is the backend running? Run: cd backend && npm start', 'error');
+    };
+  }
+
+  streamEl.addEventListener('click', (e) => {
+    if (!sessionReady) return;
+    const rect = streamEl.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    send({ type: 'click', x, y });
+    log(`Click (${x.toFixed(3)}, ${y.toFixed(3)})`);
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (!sessionReady) return;
+    if (e.target.tagName === 'INPUT') return;
+    e.preventDefault();
+    if (e.key.length === 1) {
+      send({ type: 'type', text: e.key });
+    } else {
+      send({ type: 'keydown', key: e.key });
+    }
+    log(`Key: ${e.key}`);
+  });
+
+  streamEl.addEventListener('wheel', (e) => {
+    if (!sessionReady) return;
+    e.preventDefault();
+    const rect = streamEl.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    send({ type: 'scroll', x, y, deltaY: e.deltaY });
+  }, { passive: false });
+
+  function sendNavigate() {
+    const url = document.getElementById('urlInput').value;
+    if (!url) return;
+    send({ type: 'navigate', url });
+    log(`Navigate → ${url}`);
+  }
+
+  function sendScroll(dir) {
+    send({ type: 'scroll', x: 0.5, y: 0.5, deltaY: dir * 300 });
+  }
+
+  function send(msg) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(msg));
+    }
+  }
+
+  connect();
+</script>
+</body>
+</html>
