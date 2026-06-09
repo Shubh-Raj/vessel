@@ -1,6 +1,7 @@
 const http     = require('http');
-const net      = require('net');  
+const net      = require('net');
 const express  = require('express');
+const cors     = require('cors');
 const { WebSocketServer, WebSocket } = require('ws');
 const Docker   = require('dockerode');
 
@@ -10,7 +11,8 @@ const CONTAINER_WS_PORT    = 3001;
 
 
 const app    = express();
-const server = http.createServer(app); 
+app.use(cors({ origin: 'http://localhost:3002' })); 
+const server = http.createServer(app);
 
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 
@@ -124,9 +126,29 @@ wss.on('connection', async (frontendWs, req) => {
     });
 
     frontendWs.on('message', (data) => {
-      if (containerWs.readyState === WebSocket.OPEN) {
-        containerWs.send(data);
-      }
+      if (containerWs.readyState !== WebSocket.OPEN) return;
+      containerWs.send(data);
+
+      try {
+        const msg = JSON.parse(data.toString());
+        switch (msg.type) {
+          case 'click':
+            console.log(`[input] click    x=${msg.x.toFixed(3)} y=${msg.y.toFixed(3)}`);
+            break;
+          case 'scroll':
+            console.log(`[input] scroll   x=${msg.x.toFixed(3)} y=${msg.y.toFixed(3)} deltaY=${msg.deltaY}`);
+            break;
+          case 'type':
+            console.log(`[input] type     "${msg.text}"`);
+            break;
+          case 'keydown':
+            console.log(`[input] keydown  ${msg.key}`);
+            break;
+          case 'navigate':
+            console.log(`[input] navigate → ${msg.url}`);
+            break;
+        }
+      } catch (_) {}
     });
 
   } catch (err) {

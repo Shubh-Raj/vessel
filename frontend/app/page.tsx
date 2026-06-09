@@ -33,7 +33,7 @@ function LandingView({ onStart }: { onStart: () => void }) {
         {[
           { n: '1', text: 'Click "Start Browser"' },
           { n: '2', text: 'Docker spins up Chromium' },
-          { n: '3', text: 'Stream appears '},
+          { n: '3', text: 'Stream appears — interact live' },
         ].map((step, i, arr) => (
           <span key={step.n} style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
             <span className="flow-step">

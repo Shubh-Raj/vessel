@@ -1,25 +1,23 @@
-# Dependencies
+
 node_modules/
 .npm
 
-# Next.js build output
 frontend/.next/
 frontend/out/
 
-# Environment files
+
 .env
 .env.local
 .env.*.local
 
-# OS / Editor
+
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
 
-# Logs
 *.log
 npm-debug.log*
 
-# Docker
+
 *.tar
