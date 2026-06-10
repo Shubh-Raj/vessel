@@ -5,21 +5,18 @@ const cors     = require('cors');
 const { WebSocketServer, WebSocket } = require('ws');
 const Docker   = require('dockerode');
 
-const BACKEND_PORT         = 3000;
-const CONTAINER_IMAGE      = 'browse-container:phase2';
-const CONTAINER_WS_PORT    = 3001;
+const { allocatePort, releasePort } = require('./portAllocator');
+const registry = require('./sessionRegistry');
 
+const BACKEND_PORT    = 3000;
+const CONTAINER_IMAGE = 'browse-container:phase2';
+const MAX_SESSIONS    = 5;
 
 const app    = express();
-app.use(cors({ origin: 'http://localhost:3002' })); 
+app.use(cors({ origin: '*' }));
 const server = http.createServer(app);
-
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
-
-const wss = new WebSocketServer({ server });
-
-let activeSession = null;
-
+const wss    = new WebSocketServer({ server });
 
 async function waitForContainerPort(port, maxRetries = 30, intervalMs = 500) {
   console.log(`[backend] Probing TCP port ${port} (up to ${maxRetries} attempts)...`);
@@ -35,7 +32,7 @@ async function waitForContainerPort(port, maxRetries = 30, intervalMs = 500) {
 
       socket.on('connect', () => {
         clearTimeout(timer);
-        socket.destroy(); 
+        socket.destroy();
         resolve(true);
       });
 
@@ -46,12 +43,12 @@ async function waitForContainerPort(port, maxRetries = 30, intervalMs = 500) {
     });
 
     if (open) {
-      console.log(`[backend] Container port ready after ${attempt} attempt(s). Waiting for WS handshake to be ready...`);
+      console.log(`[backend] Port ${port} ready after ${attempt} attempt(s).`);
       await new Promise((r) => setTimeout(r, 400));
       return;
     }
 
-    console.log(`[backend] Attempt ${attempt}/${maxRetries} — port not open yet, retrying in ${intervalMs}ms...`);
+    console.log(`[backend] Attempt ${attempt}/${maxRetries} — port ${port} not open yet...`);
     await new Promise((r) => setTimeout(r, intervalMs));
   }
 
@@ -61,63 +58,67 @@ async function waitForContainerPort(port, maxRetries = 30, intervalMs = 500) {
 app.get('/api/status', (req, res) => {
   res.json({
     status: 'ok',
-    sessionActive: !!activeSession,
-    containerId: activeSession?.container?.id?.slice(0, 12) ?? null,
+    activeSessions: registry.getSessionCount(),
+    maxSessions: MAX_SESSIONS,
+    sessions: registry.getAllSessions().map((s) => ({
+      id: s.id,
+      port: s.port,
+      createdAt: s.createdAt,
+    })),
   });
 });
 
+wss.on('connection', async (frontendWs) => {
+  console.log(`\n[backend] New frontend connection. Active sessions: ${registry.getSessionCount()}/${MAX_SESSIONS}`);
 
-wss.on('connection', async (frontendWs, req) => {
-  const clientIp = req.socket.remoteAddress;
-  console.log(`\n[backend] ── New frontend connection from ${clientIp} ──`);
-
-  if (activeSession) {
-    console.warn('[backend] Session already active. Rejecting new connection.');
+  if (registry.getSessionCount() >= MAX_SESSIONS) {
+    console.warn('[backend] At capacity. Rejecting connection.');
     frontendWs.send(JSON.stringify({
       type: 'error',
-      message: 'A session is already active. Only one session is supported for now.',
+      message: 'Server is at capacity. Please try again later.',
     }));
     frontendWs.close();
     return;
   }
 
-  let container = null;
+  let container   = null;
   let containerWs = null;
+  let sessionId   = null;
+  let port        = null;
 
   try {
-   
-    console.log(`[backend] Creating container from image: ${CONTAINER_IMAGE}`);
+    port = await allocatePort();
+    console.log(`[backend] Allocated port: ${port}`);
 
     container = await docker.createContainer({
       Image: CONTAINER_IMAGE,
       HostConfig: {
-        PortBindings: {
-          '3001/tcp': [{ HostPort: `${CONTAINER_WS_PORT}` }],
-        },
         AutoRemove: true,
         NetworkMode: 'bridge',
+        PortBindings: {
+          '3001/tcp': [{ HostPort: String(port) }],
+        },
       },
     });
 
     await container.start();
-    console.log(`[backend] Container started. ID: ${container.id.slice(0, 12)}`);
+    console.log(`[backend] Container started. ID: ${container.id.slice(0, 12)} on port ${port}`);
 
     frontendWs.send(JSON.stringify({ type: 'status', message: 'container_starting' }));
 
-    await waitForContainerPort(CONTAINER_WS_PORT);
+    await waitForContainerPort(port);
 
-    containerWs = new WebSocket(`ws://localhost:${CONTAINER_WS_PORT}`);
+    containerWs = new WebSocket(`ws://localhost:${port}`);
 
     await new Promise((resolve, reject) => {
       containerWs.on('open', resolve);
       containerWs.on('error', (err) => reject(new Error(`Container WS error: ${err.message}`)));
     });
 
-    console.log('[backend] Relay established: Frontend ↔ Backend ↔ Container');
-    frontendWs.send(JSON.stringify({ type: 'status', message: 'session_ready' }));
+    sessionId = registry.createSession(container, containerWs, port);
 
-    activeSession = { container, containerWs };
-
+    console.log(`[backend] Relay established. Session: ${sessionId.slice(0, 8)}...`);
+    frontendWs.send(JSON.stringify({ type: 'status', message: 'session_ready', sessionId }));
 
     containerWs.on('message', (data) => {
       if (frontendWs.readyState === WebSocket.OPEN) {
@@ -131,60 +132,60 @@ wss.on('connection', async (frontendWs, req) => {
 
       try {
         const msg = JSON.parse(data.toString());
+        const tag = `[${sessionId.slice(0, 8)}]`;
         switch (msg.type) {
           case 'click':
-            console.log(`[input] click    x=${msg.x.toFixed(3)} y=${msg.y.toFixed(3)}`);
+            console.log(`${tag} click    x=${msg.x?.toFixed(3)} y=${msg.y?.toFixed(3)}`);
             break;
           case 'scroll':
-            console.log(`[input] scroll   x=${msg.x.toFixed(3)} y=${msg.y.toFixed(3)} deltaY=${msg.deltaY}`);
+            console.log(`${tag} scroll   x=${msg.x?.toFixed(3)} y=${msg.y?.toFixed(3)} deltaY=${msg.deltaY}`);
             break;
           case 'type':
-            console.log(`[input] type     "${msg.text}"`);
+            console.log(`${tag} type     "${msg.text}"`);
             break;
           case 'keydown':
-            console.log(`[input] keydown  ${msg.key}`);
+            console.log(`${tag} keydown  ${msg.key}`);
             break;
           case 'navigate':
-            console.log(`[input] navigate → ${msg.url}`);
+            console.log(`${tag} navigate → ${msg.url}`);
             break;
         }
       } catch (_) {}
     });
 
   } catch (err) {
-    console.error('[backend] Failed to set up session:', err.message);
+    console.error('[backend] Session setup failed:', err.message);
     if (frontendWs.readyState === WebSocket.OPEN) {
       frontendWs.send(JSON.stringify({ type: 'error', message: err.message }));
       frontendWs.close();
     }
-    await cleanup(container, containerWs);
+    await cleanup(sessionId, container, containerWs, port);
     return;
   }
 
   frontendWs.on('close', async () => {
-    console.log('[backend] Frontend disconnected. Tearing down session...');
-    await cleanup(container, containerWs);
+    console.log(`[backend] Frontend disconnected. Tearing down session ${sessionId?.slice(0, 8)}...`);
+    await cleanup(sessionId, container, containerWs, port);
   });
 
   frontendWs.on('error', (err) => {
-    console.error('[backend] Frontend WS error:', err.message);
+    console.error(`[backend] Frontend WS error:`, err.message);
   });
 
   containerWs.on('close', () => {
-    console.log('[backend] Container WS closed unexpectedly.');
+    console.log(`[backend] Container WS closed for session ${sessionId?.slice(0, 8)}.`);
     if (frontendWs.readyState === WebSocket.OPEN) {
       frontendWs.send(JSON.stringify({ type: 'status', message: 'container_closed' }));
       frontendWs.close();
     }
-    cleanup(container, containerWs);
+    cleanup(sessionId, container, containerWs, port);
   });
 });
 
-async function cleanup(container, containerWs) {
+async function cleanup(sessionId, container, containerWs, port) {
+  if (sessionId) registry.deleteSession(sessionId);
+  if (port) releasePort(port);
 
-  activeSession = null;
-
-  console.log('[backend] Running cleanup...');
   try {
     if (containerWs && containerWs.readyState !== WebSocket.CLOSED) {
       containerWs.terminate();
@@ -197,7 +198,6 @@ async function cleanup(container, containerWs) {
       console.log('[backend] Container stopped and removed.');
     }
   } catch (err) {
-
     if (!err.statusCode || (err.statusCode !== 304 && err.statusCode !== 404)) {
       console.error('[backend] Error stopping container:', err.message);
     }
@@ -205,8 +205,9 @@ async function cleanup(container, containerWs) {
 }
 
 server.listen(BACKEND_PORT, () => {
-  console.log('   Browse Backend ready ');
-  console.log(`  HTTP  →  http://localhost:${BACKEND_PORT}       `);
-  console.log(`  WS    →  ws://localhost:${BACKEND_PORT}        `);
-  console.log(`  Status→  http://localhost:${BACKEND_PORT}/api/status `);
+  console.log(`\n[backend] Vessel backend ready`);
+  console.log(`  HTTP    → http://localhost:${BACKEND_PORT}`);
+  console.log(`  WS      → ws://localhost:${BACKEND_PORT}`);
+  console.log(`  Status  → http://localhost:${BACKEND_PORT}/api/status`);
+  console.log(`  Max sessions: ${MAX_SESSIONS}\n`);
 });

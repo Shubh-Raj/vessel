@@ -17,7 +17,7 @@ export interface RemoteBrowserActions {
   setOnFrame: (cb: (data: string) => void) => void;
 }
 
-const WS_URL = 'ws://localhost:3000';
+const WS_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'ws://localhost:3000';
 
 export function useRemoteBrowser(): RemoteBrowserState & RemoteBrowserActions {
   const [sessionState, setSessionState] = useState<SessionState>('idle');
