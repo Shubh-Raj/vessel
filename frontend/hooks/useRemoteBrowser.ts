@@ -2,7 +2,7 @@
 
 import { useRef, useState, useCallback, useEffect } from 'react';
 
-export type SessionState = 'idle' | 'connecting' | 'booting' | 'active' | 'error';
+export type SessionState = 'idle' | 'connecting' | 'reconnecting' | 'booting' | 'active' | 'error';
 
 export interface RemoteBrowserState {
   sessionState: SessionState;
@@ -17,7 +17,8 @@ export interface RemoteBrowserActions {
   setOnFrame: (cb: (data: string) => void) => void;
 }
 
-const WS_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'ws://localhost:3000';
+const WS_URL            = process.env.NEXT_PUBLIC_BACKEND_URL || 'ws://localhost:3000';
+const SESSION_STORAGE_KEY = 'vessel_session_id';
 
 export function useRemoteBrowser(): RemoteBrowserState & RemoteBrowserActions {
   const [sessionState, setSessionState] = useState<SessionState>('idle');
@@ -38,15 +39,25 @@ export function useRemoteBrowser(): RemoteBrowserState & RemoteBrowserActions {
 
   const connect = useCallback(() => {
     if (wsRef.current) return;
-    setSessionState('connecting');
-    setStatusMsg('Connecting to backend...');
+
+    const storedSessionId = localStorage.getItem(SESSION_STORAGE_KEY);
+    const isReconnect     = !!storedSessionId;
+
+    setSessionState(isReconnect ? 'reconnecting' : 'connecting');
+    setStatusMsg(isReconnect ? 'Resuming your session...' : 'Connecting to backend...');
 
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
 
     ws.onopen = () => {
-      setSessionState('booting');
-      setStatusMsg('Starting Docker container...');
+      ws.send(JSON.stringify({
+        type:      'hello',
+        sessionId: storedSessionId ?? null,
+      }));
+      if (!isReconnect) {
+        setSessionState('booting');
+        setStatusMsg('Starting Docker container...');
+      }
     };
 
     ws.onmessage = (e: MessageEvent) => {
@@ -56,18 +67,30 @@ export function useRemoteBrowser(): RemoteBrowserState & RemoteBrowserActions {
           frameCountRef.current++;
           onFrameRef.current?.(msg.data as string);
           break;
+
         case 'status':
           if (msg.message === 'container_starting') {
             setSessionState('booting');
             setStatusMsg('Launching Chromium in container...');
           } else if (msg.message === 'session_ready') {
+            localStorage.setItem(SESSION_STORAGE_KEY, msg.sessionId);
             setSessionState('active');
             setStatusMsg('');
+          } else if (msg.message === 'session_resumed') {
+            setSessionState('active');
+            setStatusMsg('Session resumed');
+            setTimeout(() => setStatusMsg(''), 2500);
+          } else if (msg.message === 'session_expired') {
+            localStorage.removeItem(SESSION_STORAGE_KEY);
+            setSessionState('booting');
+            setStatusMsg('Previous session expired. Starting fresh...');
           } else if (msg.message === 'container_closed') {
+            localStorage.removeItem(SESSION_STORAGE_KEY);
             setSessionState('idle');
             setStatusMsg('');
           }
           break;
+
         case 'error':
           setSessionState('error');
           setStatusMsg(msg.message as string);
@@ -89,6 +112,7 @@ export function useRemoteBrowser(): RemoteBrowserState & RemoteBrowserActions {
   }, []);
 
   const disconnect = useCallback(() => {
+    localStorage.removeItem(SESSION_STORAGE_KEY);
     wsRef.current?.close();
     wsRef.current = null;
     setSessionState('idle');

@@ -50,11 +50,12 @@ function LandingView({ onStart }: { onStart: () => void }) {
 
 function StatusPill({ state, msg }: { state: SessionState; msg: string }) {
   const labels: Record<SessionState, string> = {
-    idle:       'Idle',
-    connecting: 'Connecting...',
-    booting:    msg || 'Starting container...',
-    active:     'Live',
-    error:      msg || 'Error',
+    idle:         'Idle',
+    connecting:   'Connecting...',
+    reconnecting: msg || 'Resuming session...',
+    booting:      msg || 'Starting container...',
+    active:       'Live',
+    error:        msg || 'Error',
   };
   return (
     <span className={`status-pill ${state}`}>
@@ -122,7 +123,7 @@ function StreamView({ sessionState, statusMsg, fps, send, setOnFrame, onStop }: 
   }, [sessionState, send]);
 
   const navigate = () => send({ type: 'navigate', url });
-  const isBooting = sessionState === 'connecting' || sessionState === 'booting';
+  const isBooting = sessionState === 'connecting' || sessionState === 'booting' || sessionState === 'reconnecting';
 
   return (
     <div className="stream-page">
