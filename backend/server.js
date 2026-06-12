@@ -13,6 +13,9 @@ const CONTAINER_IMAGE = 'browse-container:phase2';
 const MAX_SESSIONS    = 5;
 const TTL_MS          = 2 * 60 * 1000; // 2 minutes
 
+const CONTAINER_MEMORY_BYTES = 256 * 1024 * 1024; // 256 MB RAM 
+const CONTAINER_NANO_CPUS    = 0.5 * 1e9;         // 0.5 CPU cores 
+
 const app    = express();
 app.use(cors({ origin: '*' }));
 const server = http.createServer(app);
@@ -129,6 +132,9 @@ async function startNewSession(frontendWs) {
         PortBindings: {
           '3001/tcp': [{ HostPort: String(port) }],
         },
+        Memory:     CONTAINER_MEMORY_BYTES,
+        MemorySwap: CONTAINER_MEMORY_BYTES, // Equal to Memory = swap fully disabled
+        NanoCpus:   CONTAINER_NANO_CPUS,
       },
     });
 
